@@ -1,0 +1,171 @@
+const express = require('express');
+const bodyParser = require('body-parser');
+const fs = require('fs');
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+const dbPath = './db.json';
+if (!fs.existsSync(dbPath)) {
+  fs.writeFileSync(dbPath, JSON.stringify({ users: [], posts: [] }, null, 2));
+}
+let db = JSON.parse(fs.readFileSync(dbPath));
+
+// Middleware
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// Simple cookie-based session
+app.use((req, res, next) => {
+  req.user = null;
+  if (req.headers.cookie) {
+    const cookies = Object.fromEntries(req.headers.cookie.split('; ').map(c => c.split('=')));
+    const user = db.users.find(u => u.name === cookies.user);
+    if (user && user.password === cookies.pass) req.user = user;
+  }
+  next();
+});
+
+// Inline CSS used everywhere for minimal styling
+const baseStyle = `
+  <style>
+    body { font-family: monospace; margin: 2em; background: #fff; color: #000; }
+    a { color: blue; }
+    input, textarea { display: block; margin: 0.5em 0; width: 100%; max-width: 300px; }
+    hr { margin: 2em 0; }
+    form { margin-bottom: 1em; }
+    textarea { height: 80px; }
+  </style>
+`;
+
+// Pages
+app.get('/login', (req, res) => {
+  res.send(`
+    <html><head><title>Login</title>${baseStyle}</head><body>
+    <h1>Login</h1>
+    <form method="POST" action="/login">
+      <input name="name" placeholder="Username" required autofocus>
+      <input type="password" name="password" placeholder="Password" required>
+      <button>Login</button>
+    </form>
+    <a href="/signup">Signup</a>
+    </body></html>
+  `);
+});
+
+app.get('/signup', (req, res) => {
+  res.send(`
+    <html><head><title>Signup</title>${baseStyle}</head><body>
+    <h1>Signup</h1>
+    <form method="POST" action="/signup">
+      <input name="name" placeholder="Username" required autofocus>
+      <input type="password" name="password" placeholder="Password" required>
+      <button>Sign Up</button>
+    </form>
+    <a href="/login">Login</a>
+    </body></html>
+  `);
+});
+
+app.post('/signup', (req, res) => {
+  const { name, password } = req.body;
+  if (!name || !password || db.users.find(u => u.name === name)) {
+    return res.send('Signup failed. Username taken or missing fields.');
+  }
+  db.users.push({ name, password, isAdmin: false });
+  fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+  res.setHeader('Set-Cookie', [`user=${name}`, `pass=${password}`]);
+  res.redirect('/');
+});
+
+app.post('/login', (req, res) => {
+  const { name, password } = req.body;
+  const user = db.users.find(u => u.name === name && u.password === password);
+  if (!user) return res.send('Login failed. Invalid username or password.');
+  res.setHeader('Set-Cookie', [`user=${name}`, `pass=${password}`]);
+  res.redirect('/');
+});
+
+app.post('/post', (req, res) => {
+  if (!req.user) return res.redirect('/login');
+  const { content } = req.body;
+  if (!content.trim()) return res.redirect('/');
+  const post = { id: Date.now(), author: req.user.name, content, comments: [] };
+  db.posts.push(post);
+  fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+  res.redirect('/');
+});
+
+app.post('/comment', (req, res) => {
+  if (!req.user) return res.redirect('/login');
+  const { postId, content } = req.body;
+  const post = db.posts.find(p => p.id == postId);
+  if (!post || !content.trim()) return res.redirect('/');
+  post.comments.push({ author: req.user.name, content });
+  fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+  res.redirect('/');
+});
+
+app.post('/admin-code', (req, res) => {
+  if (!req.user) return res.redirect('/login');
+  if (req.body.code === 'minadd') {
+    req.user.isAdmin = true;
+    fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+  }
+  res.redirect('/admin');
+});
+
+app.get('/admin', (req, res) => {
+  if (!req.user || !req.user.isAdmin) return res.send('Access Denied');
+  res.send(`
+    <html><head><title>Admin Portal</title>${baseStyle}</head><body>
+    <h1>Admin Portal</h1>
+    <p>Welcome, ${req.user.name}</p>
+    <h2>Users:</h2>
+    <ul>
+      ${db.users.map(u => `<li>${u.name} - Admin: ${u.isAdmin}</li>`).join('')}
+    </ul>
+    <h2>All Posts:</h2>
+    <ul>
+      ${db.posts.map(p => `<li><b>${p.author}:</b> ${p.content}</li>`).join('')}
+    </ul>
+    <a href="/">Home</a>
+    </body></html>
+  `);
+});
+
+app.get('/', (req, res) => {
+  const posts = db.posts.map(p => `
+    <div>
+      <b>${p.author}</b>: ${p.content.replace(/</g, "&lt;").replace(/>/g, "&gt;")}<br>
+      <form method="POST" action="/comment">
+        <input type="hidden" name="postId" value="${p.id}" />
+        <input name="content" placeholder="Add a comment" />
+        <button>Comment</button>
+      </form>
+      <ul>
+        ${p.comments.map(c => `<li>${c.author}: ${c.content.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</li>`).join('')}
+      </ul>
+    </div><hr>
+  `).join('');
+  const userInfo = req.user ? `
+    <p>Logged in as ${req.user.name} ${req.user.isAdmin ? '(Admin)' : ''}</p>
+    <form method="POST" action="/post">
+      <textarea name="content" placeholder="Write a post..."></textarea>
+      <button>Post</button>
+    </form>
+    <form method="POST" action="/admin-code">
+      <input name="code" placeholder="Enter admin code" />
+      <button>Submit Code</button>
+    </form>
+    <a href="/admin">Admin Portal</a>
+  ` : '<a href="/login">Login</a> | <a href="/signup">Signup</a>';
+  res.send(`
+    <html><head><title>Simple Text Social</title>${baseStyle}</head><body>
+    <h1>Simple Text Social</h1>
+    ${userInfo}
+    <hr>
+    ${posts}
+    </body></html>
+  `);
+});
+
+app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
